@@ -168,8 +168,8 @@ $sql_categories = mysqli_query(
         <div class="card-header py-2">
             <h3 class="card-title mt-2"><i class="fa fa-fw fa-life-ring mr-2"></i>Tickets
                 <small class="ml-3">
-                    <a href="?<?php echo $client_url; ?>status=Open" class="text-light"><strong><?php echo $total_tickets_open; ?></strong> Open</a> |
-                    <a href="?<?php echo $client_url; ?>status=Closed" class="text-light"><strong><?php echo $total_tickets_closed; ?></strong> Closed</a>
+                    <a href="?<?php echo $client_url; ?>status=Open" class="text-light"><strong id="total-tickets-open-count"><?php echo $total_tickets_open; ?></strong> Open</a> |
+                    <a href="?<?php echo $client_url; ?>status=Closed" class="text-light"><strong id="total-tickets-closed-count"><?php echo $total_tickets_closed; ?></strong> Closed</a>
                 </small>
             </h3>
             <div class="card-tools">
@@ -243,13 +243,13 @@ $sql_categories = mysqli_query(
                                     <i class="fa fa-fw fa-envelope mr-2"></i>My Tickets
                                 </button>
                                 <div class="dropdown-menu">
-                                    <a class="dropdown-item" href="?<?php echo $client_url; ?>status=Open&assigned=<?php echo $session_user_id ?>">Active tickets (<?php echo $user_active_assigned_tickets ?>)</a>
+                                    <a class="dropdown-item" href="?<?php echo $client_url; ?>status=Open&assigned=<?php echo $session_user_id ?>">Active tickets (<strong id="user-active-assigned-tickets-count"><?php echo $user_active_assigned_tickets ?></strong>)</a>
                                     <div class="dropdown-divider"></div>
                                     <a class="dropdown-item " href="?<?php echo $client_url; ?>status=Closed&assigned=<?php echo $session_user_id ?>">Closed tickets</a>
                                 </div>
                             </div>
                             <a href="?<?php echo $client_url; ?>assigned=unassigned" class="btn btn-outline-danger">
-                                <i class="fa fa-fw fa-exclamation-triangle mr-2"></i>Unassigned Tickets | <strong> <?php echo $total_tickets_unassigned; ?></strong>
+                                <i class="fa fa-fw fa-exclamation-triangle mr-2"></i>Unassigned Tickets | <strong id="total-tickets-unassigned-count"> <?php echo $total_tickets_unassigned; ?></strong>
                             </a>
 
                             <?php if (lookupUserPermission("module_support") >= 2) { ?>
@@ -432,6 +432,287 @@ if (isset($_GET["view"])) {
 ?>
 
 <script src="js/bulk_actions.js"></script>
+
+<?php
+// Expose the default view configuration to JavaScript
+$js_default_view = 'list'; // Default to list
+if (isset($config_ticket_default_view)) {
+    if ($config_ticket_default_view === 1) {
+        $js_default_view = 'compact';
+    } elseif ($config_ticket_default_view === 2) {
+        $js_default_view = 'kanban';
+    }
+}
+echo "<script>window.DEFAULT_TICKET_VIEW = '" . htmlspecialchars($js_default_view, ENT_QUOTES, 'UTF-8') . "';</script>";
+echo "<script>window.CURRENT_USER_IS_CLIENT_VIEW = " . (isset($client_url) && !empty($client_url) ? 'true' : 'false') . ";</script>";
+echo "<script>window.SESSION_USER_ID = " . json_encode(isset($session_user_id) ? $session_user_id : null) . ";</script>";
+// Note: For matching assigned_to_user_name, exposing session_user_name would be better, but requires $session_name to be consistently set.
+// For now, JS will have to rely on ID if SSE payload for assigned_to_user_id is added later, or implement name matching carefully.
+?>
+
+<script>
+    document.addEventListener('DOMContentLoaded', function () {
+        console.log("Attempting to connect to SSE for ticket updates...");
+        const evtSource = new EventSource("sse_ticket_updates.php?rand=" + Math.random());
+
+        evtSource.onopen = function() {
+            console.log("SSE connection opened.");
+        };
+
+        evtSource.addEventListener("new_ticket", function(event) {
+            try {
+                const ticketData = JSON.parse(event.data);
+                console.log("New ticket received:", ticketData);
+                addNewTicketToUI(ticketData);
+                updateTicketCounters(ticketData); // Call the new counter function
+            } catch (e) {
+                console.error("Error parsing new ticket data:", e);
+                console.log("Received raw data:", event.data);
+            }
+        });
+
+        evtSource.addEventListener("error", function(event) {
+            console.error("EventSource failed:", event);
+            if (evtSource.readyState == EventSource.CLOSED) {
+                console.log("SSE connection was closed.");
+            }
+        });
+
+        evtSource.onmessage = function(event) {
+            if (event.data.startsWith(": heartbeat")) {
+                console.log("SSE Heartbeat received");
+            } else if (event.data.startsWith("event: error")) {
+                 console.error("Received custom error event from server:", event.data);
+            } else if (event.data && event.data.trim() !== "") {
+                console.log("SSE generic message:", event.data);
+            }
+        };
+
+        window.addEventListener('beforeunload', function() {
+            if (evtSource) {
+                evtSource.close();
+                console.log("SSE connection closed due to page unload.");
+            }
+        });
+
+        function getCurrentView() {
+            const urlParams = new URLSearchParams(window.location.search);
+            const viewParam = urlParams.get('view');
+            if (viewParam) return viewParam;
+            return window.DEFAULT_TICKET_VIEW || 'list';
+        }
+
+        function addNewTicketToUI(ticketData) {
+            const currentView = getCurrentView();
+            console.log("Current view detected:", currentView);
+
+            switch (currentView) {
+                case 'list':
+                    renderTicketInListView(ticketData);
+                    break;
+                case 'compact':
+                    renderTicketInCompactView(ticketData);
+                    break;
+                case 'kanban':
+                    if (ticketData.ticket_status_name && ticketData.ticket_status_name.toLowerCase() !== 'closed' && ticketData.ticket_status_name.toLowerCase() !== 'resolved') {
+                        renderTicketInKanbanView(ticketData);
+                    } else {
+                        console.log("New ticket is closed/resolved, not adding to Kanban view:", ticketData.ticket_status_name);
+                    }
+                    break;
+                default:
+                    console.warn("Unknown view or view not requiring real-time updates:", currentView, "- defaulting to list view if list container exists.");
+                    if (document.querySelector('#ticket-list-view table.table-striped tbody')) {
+                        renderTicketInListView(ticketData);
+                    }
+                    break;
+            }
+        }
+
+        function getPriorityColor(priority) {
+            if (!priority) return 'secondary';
+            switch (priority.toLowerCase()) {
+                case 'high': return 'danger';
+                case 'medium': return 'warning';
+                case 'low': return 'info';
+                default: return 'secondary';
+            }
+        }
+
+        function escapeHTML(str) {
+            if (str === null || str === undefined) return '';
+            return String(str).replace(/[&<>"']/g, function (match) {
+                return {
+                    '&': '&amp;',
+                    '<': '&lt;',
+                    '>': '&gt;',
+                    '"': '&quot;',
+                    "'": '&#39;'
+                }[match];
+            });
+        }
+
+        function renderTicketInListView(ticketData) {
+            const tableBody = document.querySelector('#ticket-list-view table.table-striped tbody');
+            if (!tableBody) {
+                if (getCurrentView() === 'list') console.error("List view: Table body ('#ticket-list-view table.table-striped tbody') not found.");
+                return;
+            }
+
+            const newRow = document.createElement('tr');
+            newRow.classList.add('text-bold');
+            const isClientView = window.CURRENT_USER_IS_CLIENT_VIEW;
+            const lastResponseUser = escapeHTML(ticketData.assigned_to_user_name || ticketData.created_by_user_name || 'N/A');
+
+            newRow.innerHTML = `
+                <td><div class="form-check"><input class="form-check-input bulk-select" type="checkbox" name="ticket_ids[]" value="${escapeHTML(ticketData.ticket_id)}"></div></td>
+                <td><a href="${escapeHTML(ticketData.url)}"><span class="badge badge-pill badge-secondary p-3">${escapeHTML(ticketData.ticket_prefix)}${escapeHTML(ticketData.ticket_number)}</span></a></td>
+                <td><a href="${escapeHTML(ticketData.url)}">${escapeHTML(ticketData.ticket_subject)}</a></td>
+                <td>${isClientView ? `<div>${escapeHTML(ticketData.contact_name)}</div>` : `<a href="clients.php?client_id=${escapeHTML(ticketData.client_id)}"><strong>${escapeHTML(ticketData.client_name)}</strong></a><div>${escapeHTML(ticketData.contact_name)}</div>`}</td>
+                <td><a href="#"><span class='p-2 badge badge-pill badge-${getPriorityColor(ticketData.ticket_priority)}'>${escapeHTML(ticketData.ticket_priority)}</span></a></td>
+                <td><span class='badge badge-pill text-light p-2' style="background-color: ${escapeHTML(ticketData.ticket_status_color)};">${escapeHTML(ticketData.ticket_status_name)}</span></td>
+                <td><a href="#">${escapeHTML(ticketData.assigned_to_user_name) || 'Not Assigned'}</a></td>
+                <td><div title="${escapeHTML(ticketData.ticket_updated_at)}">${escapeHTML(ticketData.ticket_updated_at_time_ago)}</div><div>${lastResponseUser}</div></td>
+                <td><div title="${escapeHTML(ticketData.ticket_created_at)}">${escapeHTML(ticketData.ticket_created_at_time_ago)}</div></td>
+            `;
+
+            tableBody.insertBefore(newRow, tableBody.firstChild);
+            highlightAndManageEmptyState(newRow, tableBody, '#ticket-list-view table.table-striped thead');
+        }
+
+        function renderTicketInCompactView(ticketData) {
+            const tableBody = document.querySelector('#ticket-compact-view table.table-striped tbody');
+            if (!tableBody) {
+                 if (getCurrentView() === 'compact') console.error("Compact view: Table body ('#ticket-compact-view table.table-striped tbody') not found.");
+                return;
+            }
+
+            const newRow = document.createElement('tr');
+            newRow.classList.add('text-bold');
+            const isClientView = window.CURRENT_USER_IS_CLIENT_VIEW;
+
+            // Compact view does not display timeAgo fields in rows, structure remains the same.
+            newRow.innerHTML = `
+                <td><div class="form-check"><input class="form-check-input bulk-select" type="checkbox" name="ticket_ids[]" value="${escapeHTML(ticketData.ticket_id)}"></div></td>
+                <td>
+                    <div class="mt-1"><span class='badge badge-${getPriorityColor(ticketData.ticket_priority)}'>${escapeHTML(ticketData.ticket_priority)}</span></div>
+                    <a href="${escapeHTML(ticketData.url)}">${escapeHTML(ticketData.ticket_subject)}</a>
+                </td>
+                <td>${isClientView ? `<div>${escapeHTML(ticketData.contact_name)}</div>` : `<a href="clients.php?client_id=${escapeHTML(ticketData.client_id)}"><strong>${escapeHTML(ticketData.client_name)}</strong></a><div>${escapeHTML(ticketData.contact_name)}</div>`}</td>
+                <td><span class='badge text-light p-2' style="background-color: ${escapeHTML(ticketData.ticket_status_color)};">${escapeHTML(ticketData.ticket_status_name)}</span></td>
+                <td><a href="#">${escapeHTML(ticketData.assigned_to_user_name) || 'Not Assigned'}</a></td>
+            `;
+
+            tableBody.insertBefore(newRow, tableBody.firstChild);
+            highlightAndManageEmptyState(newRow, tableBody, '#ticket-compact-view table.table-striped thead');
+        }
+
+        function renderTicketInKanbanView(ticketData) {
+            const kanbanColumnContent = document.querySelector(`#kanban-board .kanban-column[data-status-id="${ticketData.ticket_status_id}"] .kanban-status`);
+            if (!kanbanColumnContent) {
+                if (getCurrentView() === 'kanban') console.warn(`Kanban column for status ID ${ticketData.ticket_status_id} not found! Ticket: "${escapeHTML(ticketData.ticket_subject)}". This ticket will not be displayed in Kanban view in real-time.`);
+                return;
+            }
+
+            const newCard = document.createElement('div');
+            newCard.classList.add('task', 'grab-cursor');
+            newCard.setAttribute('data-ticket-id', ticketData.ticket_id);
+            newCard.setAttribute('data-ticket-status-id', ticketData.ticket_status_id);
+            newCard.ondblclick = function() { window.location.href = ticketData.url; };
+
+            const clientDisplay = window.CURRENT_USER_IS_CLIENT_VIEW ? escapeHTML(ticketData.contact_name) : `${escapeHTML(ticketData.client_name)}${ticketData.contact_name ? ' - ' + escapeHTML(ticketData.contact_name) : ''}`;
+
+            newCard.innerHTML = `
+                <span class='badge badge-${getPriorityColor(ticketData.ticket_priority)}'>${escapeHTML(ticketData.ticket_priority)}</span>
+                <span class='badge badge-secondary'>${escapeHTML(ticketData.category_name)}</span>
+                <br>
+                <b>${clientDisplay}</b>
+                <br>
+                <i class="fa fa-fw fa fa-life-ring text-secondary mr-2"></i>${escapeHTML(ticketData.ticket_subject)}
+                <br>
+                <i class="fas fa-fw fa-user mr-2 text-secondary"></i>${escapeHTML(ticketData.assigned_to_user_name) || 'N/A'}
+                <br>
+                <small class="text-muted">Created: ${escapeHTML(ticketData.ticket_created_at_time_ago)}</small>
+                <br>
+                <small class="text-muted">Updated: ${escapeHTML(ticketData.ticket_updated_at_time_ago)}</small>
+            `;
+
+            kanbanColumnContent.insertBefore(newCard, kanbanColumnContent.firstChild);
+
+            const placeholder = kanbanColumnContent.querySelector('.empty-placeholder');
+            if (placeholder) {
+                placeholder.remove();
+            }
+
+            highlightAndManageEmptyState(newCard, null, null);
+        }
+
+        function highlightAndManageEmptyState(newElement, tableBodyOrParentContainer, tableHeadSelector) {
+            if (newElement) {
+                newElement.style.backgroundColor = '#FFFFE0';
+                setTimeout(() => {
+                    if (newElement) newElement.style.backgroundColor = '';
+                }, 3000);
+            }
+
+            if (tableBodyOrParentContainer) {
+                const noItemsRow = tableBodyOrParentContainer.querySelector('tr td[colspan]');
+                if (noItemsRow && (noItemsRow.textContent.includes("No tickets found") || noItemsRow.textContent.includes("No items found"))) {
+                    noItemsRow.parentElement.remove();
+                }
+            }
+
+            if (tableHeadSelector) {
+                 const tableHead = document.querySelector(tableHeadSelector);
+                 if (tableHead && tableHead.classList.contains('d-none')) {
+                     tableHead.classList.remove('d-none');
+                 }
+            }
+        }
+
+        function updateTicketCounters(ticketData) {
+            // Helper to update a counter
+            function incrementCounter(elementId) {
+                const element = document.getElementById(elementId);
+                if (element) {
+                    let currentCount = parseInt(element.textContent, 10);
+                    if (!isNaN(currentCount)) {
+                        element.textContent = currentCount + 1;
+                    }
+                } else {
+                    console.warn(`Counter element with ID '${elementId}' not found.`);
+                }
+            }
+
+            const isTicketOpen = ticketData.ticket_status_name &&
+                                 ticketData.ticket_status_name.toLowerCase() !== 'closed' &&
+                                 ticketData.ticket_status_name.toLowerCase() !== 'resolved';
+
+            if (isTicketOpen) {
+                incrementCounter('total-tickets-open-count');
+
+                // Check for 'assigned_to_user_id' in payload. If not present, this part won't work.
+                // It was not explicitly in the reported payload of sse_ticket_updates.php
+                if (ticketData.assigned_to_user_id === undefined) {
+                    console.warn("SSE payload missing 'assigned_to_user_id'. 'My Active Tickets' and 'Unassigned' counters might be inaccurate.");
+                }
+
+                if (ticketData.assigned_to_user_id === null || ticketData.assigned_to_user_id === 0 || ticketData.assigned_to_user_id === "0") {
+                     // Also check name as a fallback, though ID is preferred
+                    if (ticketData.assigned_to_user_name === 'Not Assigned' || !ticketData.assigned_to_user_name) {
+                         incrementCounter('total-tickets-unassigned-count');
+                    }
+                }
+
+                if (window.SESSION_USER_ID && ticketData.assigned_to_user_id === window.SESSION_USER_ID) {
+                    incrementCounter('user-active-assigned-tickets-count');
+                }
+            }
+            // No need to increment 'total-tickets-closed-count' for new tickets via SSE
+        }
+
+    });
+</script>
 
 <?php
 require_once "modals/ticket_add_modal.php";

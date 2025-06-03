@@ -1,13 +1,14 @@
-<div class="card card-dark">
-    <div class="card-body">
-        <form id="bulkActions" action="post.php" method="post">
-            <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token'] ?>">
+<div id="ticket-compact-view">
+    <div class="card card-dark">
+        <div class="card-body">
+            <form id="bulkActions" action="post.php" method="post">
+                <input type="hidden" name="csrf_token" value="<?php echo $_SESSION['csrf_token'] ?>">
 
-            <div class="table-responsive-sm">
-                <table class="table table-striped table-borderless table-hover">
-                    <thead class="text-dark <?php if (!$num_rows[0]) { echo "d-none"; } ?>">
-                    <tr>
-                        <td>
+                <div class="table-responsive-sm">
+                    <table class="table table-striped table-borderless table-hover">
+                        <thead class="text-dark <?php if (!$num_rows[0]) { echo "d-none"; } ?>">
+                        <tr>
+                            <td>
                             <div class="form-check">
                                 <input class="form-check-input" id="selectAllCheckbox" type="checkbox" onclick="checkAll(this)" onKeyPress="checkAll(this)">
                             </div>
@@ -292,7 +293,8 @@
             <?php require_once "modals/ticket_bulk_reply_modal.php"; ?>
             <?php require_once "modals/ticket_bulk_merge_modal.php"; ?>
             <?php require_once "modals/ticket_bulk_resolve_modal.php"; ?>
-        </form>
-        <?php require_once "includes/filter_footer.php"; ?>
+            </form>
+            <?php require_once "includes/filter_footer.php"; ?>
+        </div>
     </div>
 </div>
